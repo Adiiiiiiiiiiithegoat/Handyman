@@ -1,0 +1,69 @@
+{
+  "settings": {
+    "camera_index": 0,
+    "debounce_frames": 4,
+    "cooldown_seconds": 1.2,
+    "pinch_threshold": 0.06,
+    "battery_idle_timeout_seconds": 300
+  },
+  "gestures": {
+    "fist": {
+      "label": "Mute/unmute system audio",
+      "action": "media_key",
+      "value": "volumemute"
+    },
+    "open_palm": {
+      "label": "Play/pause current media",
+      "action": "media_key",
+      "value": "playpause"
+    },
+    "thumbs_up": {
+      "label": "Volume up (+5%)",
+      "action": "volume_step",
+      "value": 5,
+      "repeat": true
+    },
+    "thumbs_down": {
+      "label": "Volume down (-5%)",
+      "action": "volume_step",
+      "value": -5,
+      "repeat": true
+    },
+    "peace": {
+      "label": "Next track",
+      "action": "media_key",
+      "value": "nexttrack"
+    },
+    "point": {
+      "label": "Screenshot (Windows snip overlay)",
+      "action": "hotkey",
+      "value": ["win", "shift", "s"]
+    },
+    "ok_sign": {
+      "label": "Launch a game via Steam. Replace with your game's app id (see README), or a direct .exe path",
+      "action": "launch_app",
+      "value": "steam://rungameid/REPLACE_ME_STEAM_APP_ID"
+    },
+    "rock_on": {
+      "label": "Launch the installed Spotify app",
+      "action": "launch_app",
+      "value": "spotify:"
+    },
+    "l_shape": {
+      "label": "Open Opera with a preset set of tabs. Replace browser_path with your opera.exe (see README) and urls with the tabs you want",
+      "action": "open_browser_tabs",
+      "value": {
+        "browser_path": "C:\\Users\\REPLACE_ME_USERNAME\\AppData\\Local\\Programs\\Opera\\opera.exe",
+        "urls": [
+          "https://REPLACE_ME_FIRST_TAB.example.com",
+          "https://REPLACE_ME_SECOND_TAB.example.com"
+        ]
+      }
+    },
+    "three_fingers": {
+      "label": "Launch an app of your choice. Replace with any .exe path, folder, or URI — or switch action to open_multiple with a list",
+      "action": "launch_app",
+      "value": "C:\\REPLACE_ME\\path\\to\\your\\app.exe"
+    }
+  }
+}
