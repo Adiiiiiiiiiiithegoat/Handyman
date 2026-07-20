@@ -4,7 +4,10 @@
     "debounce_frames": 4,
     "cooldown_seconds": 1.2,
     "pinch_threshold": 0.06,
-    "battery_idle_timeout_seconds": 300
+    "battery_idle_timeout_seconds": 300,
+    "arm_hold_seconds": 3,
+    "armed_timeout_seconds": 12,
+    "show_preview": true
   },
   "gestures": {
     "fist": {
@@ -33,11 +36,6 @@
       "label": "Next track",
       "action": "media_key",
       "value": "nexttrack"
-    },
-    "point": {
-      "label": "Screenshot (Windows snip overlay)",
-      "action": "hotkey",
-      "value": ["win", "shift", "s"]
     },
     "ok_sign": {
       "label": "Launch a game via Steam. Replace with your game's app id (see README), or a direct .exe path",

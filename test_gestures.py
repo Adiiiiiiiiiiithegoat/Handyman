@@ -47,6 +47,21 @@ def run():
     fist_lm[h.THUMB_TIP] = P(x=0.55, y=0.6)  # sharp bend at IP, not straight
     assert c._thumb_straightness_deg(fist_lm) < 150
 
+    # Regression: real thumbs-up geometry — fist rotated sideways, so curled
+    # fingertips sit slightly ABOVE their PIP joints on screen. The old
+    # tip.y < pip.y check misread them as extended and dropped the gesture.
+    c2 = h.GestureClassifier()
+    side = make_lm(pinch=False)
+    side[h.WRIST] = P(x=0.5, y=0.5)
+    side[h.THUMB_MCP] = P(x=0.45, y=0.42)
+    side[h.THUMB_IP] = P(x=0.45, y=0.35)
+    side[h.THUMB_TIP] = P(x=0.45, y=0.28)  # straight thumb pointing up
+    for tip, pip in zip(h.FINGER_TIPS, h.FINGER_PIPS):
+        side[pip] = P(x=0.30, y=0.50)
+        side[tip] = P(x=0.38, y=0.46)  # curled back toward wrist, above PIP on screen
+    assert c2._finger_states(side) == (True, False, False, False, False), c2._finger_states(side)
+    assert c2.classify(side) == "thumbs_up"
+
     straight_lm = make_lm(pinch=False)
     straight_lm[h.THUMB_MCP] = P(x=0.5, y=0.5)
     straight_lm[h.THUMB_IP] = P(x=0.5, y=0.4)

@@ -10,11 +10,15 @@ import math
 import os
 import subprocess
 import sys
+import threading
 import time
+import winreg
 
 import cv2
 import psutil
 import pyautogui
+import pystray
+from PIL import Image as PILImage, ImageDraw
 from pycaw.utils import AudioUtilities
 from mediapipe.tasks.python import BaseOptions
 from mediapipe.tasks.python.vision import (
@@ -29,6 +33,11 @@ from mediapipe.tasks.python.vision import drawing_utils
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
+
+WEBCAM_CONSENT_STORE = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\CapabilityAccessManager\ConsentStore\webcam"
+)
+CAMERA_CHECK_INTERVAL = 1.0  # seconds between "does another app want the camera" checks
 
 # MediaPipe landmark indices.
 WRIST = 0
@@ -91,10 +100,15 @@ class GestureClassifier:
         """Return (thumb, index, middle, ring, pinky) extended booleans.
 
         Thumb: straight at the IP joint (see _thumb_straightness_deg). Other
-        fingers: tip above PIP joint (smaller y = higher on screen).
+        fingers: tip farther from the wrist than the PIP joint. This is
+        rotation-invariant — a tip-above-PIP y-check breaks on a sideways
+        fist (thumbs up/down), where curled tips can sit above their PIPs
+        on screen and misread as extended.
         """
+        wrist = lm[WRIST]
         thumb = self._thumb_straightness_deg(lm) > 150
-        others = [lm[tip].y < lm[pip].y for tip, pip in zip(FINGER_TIPS, FINGER_PIPS)]
+        others = [self._dist(lm[tip], wrist) > self._dist(lm[pip], wrist)
+                  for tip, pip in zip(FINGER_TIPS, FINGER_PIPS)]
         return (thumb, *others)
 
     def classify(self, lm):
@@ -121,6 +135,42 @@ class GestureClassifier:
         if thumb and index and not any((middle, ring, pinky)):
             return "l_shape"
         return None
+
+
+def _camera_claimed_by_others():
+    """True if some app other than us is actively reading the webcam right now.
+
+    Reads the same per-app usage log that drives Windows' own camera-in-use
+    taskbar icon (Settings > Privacy > Camera). Each app gets a subkey with
+    a LastUsedTimeStop value that's zero while it's still using the camera.
+    Letting Windows be the source of truth means this yields to *any* other
+    app (Teams, Zoom, the Camera app, ...) without hardcoding names.
+    """
+    own = os.path.normcase(sys.executable)
+    claimed = False
+    for sub in ("", r"\NonPackaged"):
+        try:
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, WEBCAM_CONSENT_STORE + sub)
+        except OSError:
+            continue
+        with key:
+            i = 0
+            while True:
+                try:
+                    name = winreg.EnumKey(key, i)
+                except OSError:
+                    break
+                i += 1
+                if name == "NonPackaged" or os.path.normcase(name.replace("#", "\\")) == own:
+                    continue
+                try:
+                    with winreg.OpenKey(key, name) as entry:
+                        stop, _ = winreg.QueryValueEx(entry, "LastUsedTimeStop")
+                    if stop == 0:
+                        claimed = True
+                except OSError:
+                    continue
+    return claimed
 
 
 _volume_interface = None  # lazy-initialized COM handle; avoids startup cost if unused
@@ -169,13 +219,61 @@ def execute_action(name, entry):
         print(f"[{name}] action failed: {e}")
 
 
+class TrayIndicator:
+    """System-tray (taskbar notification area) dot: green = armed, red = disarmed.
+
+    pystray owns the tray icon on its own thread; the main loop just calls
+    set_armed(). Right-click > Quit sets stop_event so the main loop exits
+    cleanly — the reliable way to stop it when running headless at startup
+    (no console, and the preview window may be hidden).
+    """
+
+    def __init__(self):
+        self.stop_event = threading.Event()
+        self._icon = pystray.Icon(
+            "hand_gesture_control",
+            self._image(False),
+            "Hand Gesture Control — disarmed",
+            menu=pystray.Menu(pystray.MenuItem("Quit", self._quit)),
+        )
+        threading.Thread(target=self._icon.run, daemon=True).start()
+
+    @staticmethod
+    def _image(armed):
+        img = PILImage.new("RGBA", (64, 64), (0, 0, 0, 0))
+        ImageDraw.Draw(img).ellipse((8, 8, 56, 56),
+                                    fill=(34, 200, 34) if armed else (210, 40, 40))
+        return img
+
+    def set_armed(self, armed):
+        self._icon.icon = self._image(armed)
+        self._icon.title = "Hand Gesture Control — " + ("armed" if armed else "disarmed")
+
+    def _quit(self, icon, _item):
+        self.stop_event.set()
+        icon.stop()
+
+    def close(self):
+        self._icon.stop()
+
+
 def main():
-    """Open the webcam and run the detect -> debounce -> cooldown -> action loop."""
+    """Open the webcam and run the detect -> debounce -> cooldown -> action loop.
+
+    Yields the camera to any other app that wants it (see
+    _camera_claimed_by_others): this app has the lowest priority for the
+    webcam, so it releases its handle whenever something else claims it and
+    reacquires once that app is done, instead of holding it exclusively.
+    """
     cfg = load_config(CONFIG_PATH)
     settings = cfg["settings"]
     debounce_frames = settings.get("debounce_frames", 4)
     cooldown = settings.get("cooldown_seconds", 1.2)
     battery_idle_timeout = settings.get("battery_idle_timeout_seconds", 300)
+    camera_index = settings.get("camera_index", 0)
+    arm_hold = settings.get("arm_hold_seconds", 3)
+    armed_timeout = settings.get("armed_timeout_seconds", 12)
+    show_preview = settings.get("show_preview", False)  # off = background, tray icon only
 
     if not os.path.exists(MODEL_PATH):
         sys.exit(f"Hand landmark model not found: {MODEL_PATH}\n"
@@ -183,10 +281,14 @@ def main():
                  "hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task "
                  "and place it next to this script.")
 
-    cap = cv2.VideoCapture(settings.get("camera_index", 0))
+    cap = cv2.VideoCapture(camera_index)
     if not cap.isOpened():
-        sys.exit("No webcam found. Check that the camera is connected and not in use "
-                 "by another app, or change settings.camera_index in config.json.")
+        cap.release()
+        if _camera_claimed_by_others():
+            cap = None  # another app has it; the main loop will wait its turn
+        else:
+            sys.exit("No webcam found. Check that the camera is connected, "
+                     "or change settings.camera_index in config.json.")
 
     classifier = GestureClassifier(settings.get("pinch_threshold", 0.06))
     landmarker = HandLandmarker.create_from_options(HandLandmarkerOptions(
@@ -201,27 +303,59 @@ def main():
     stable_gesture = None                # last gesture confirmed by debounce
     fired_this_hold = False              # has stable_gesture already fired once?
     last_fired = {}                      # gesture name -> timestamp, for repeat cooldown
-    start_time = time.time()
+    armed = False                        # actions only fire while armed
+    armed_at = 0.0                       # for the idle auto-disarm timeout
+    point_hold_start = None              # when the current continuous "point" hold began
+    toggle_consumed = False              # arm/disarm fired for this hold; wait for release
+    tray = TrayIndicator()
+    start_time = time.monotonic()  # detect_for_video needs strictly increasing timestamps; wall clock can step backward
     last_hand_seen = time.time()         # for the on-battery idle timeout
-    print("Running. Show a gesture to the camera; press 'q' in the window to quit.")
+    last_camera_check = 0.0
+    print("Running. Tray icon (bottom-right, near the clock): red = disarmed, green = armed.")
+    print("Hold the point gesture for 3s to arm. Quit via the tray icon's right-click menu"
+          + (" or 'q' in the preview window." if show_preview else "."))
+    print("Yields the camera automatically whenever another app needs it.")
     print(f"On battery, this closes after {battery_idle_timeout}s with no hand in frame; "
-          "plugged in, it runs until you press 'q'.")
+          "plugged in, it runs until you quit.")
 
     while True:
+        now_mono = time.monotonic()
+        if now_mono - last_camera_check >= CAMERA_CHECK_INTERVAL:
+            last_camera_check = now_mono
+            claimed = _camera_claimed_by_others()
+            if claimed and cap is not None:
+                cap.release()
+                cap = None
+                cv2.destroyAllWindows()
+                print("Another app wants the camera; pausing until it's free.")
+            elif not claimed and cap is None:
+                candidate_cap = cv2.VideoCapture(camera_index)
+                if candidate_cap.isOpened():
+                    cap = candidate_cap
+                    print("Camera free again; resuming.")
+                else:
+                    candidate_cap.release()
+
+        if cap is None:
+            time.sleep(0.2)
+            continue
+
         ok, frame = cap.read()
         if not ok:
-            print("Lost the camera feed; exiting.")
-            break
+            cap.release()
+            cap = None
+            continue  # likely lost the race with another app; next check will sort it out
         frame = cv2.flip(frame, 1)  # mirror for natural interaction
         mp_image = Image(image_format=ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        timestamp_ms = int((time.time() - start_time) * 1000)
+        timestamp_ms = int((time.monotonic() - start_time) * 1000)
         result = landmarker.detect_for_video(mp_image, timestamp_ms)
 
         gesture = None
         if result.hand_landmarks:
             last_hand_seen = time.time()
             lm = result.hand_landmarks[0]
-            drawing_utils.draw_landmarks(frame, lm, HandLandmarksConnections.HAND_CONNECTIONS)
+            if show_preview:
+                drawing_utils.draw_landmarks(frame, lm, HandLandmarksConnections.HAND_CONNECTIONS)
             gesture = classifier.classify(lm)
 
         battery = psutil.sensors_battery()
@@ -238,24 +372,57 @@ def main():
             stable_gesture = stable
             fired_this_hold = False
 
-        if stable and stable in cfg["gestures"]:
+        now = time.time()
+
+        # Arm/disarm: hold "point" steadily for arm_hold seconds to toggle.
+        # toggle_consumed makes one hold flip the state exactly once; you must
+        # drop the point before it can toggle again.
+        if stable == "point":
+            if point_hold_start is None:
+                point_hold_start = now
+            elif not toggle_consumed and now - point_hold_start >= arm_hold:
+                armed = not armed
+                armed_at = now
+                toggle_consumed = True
+                tray.set_armed(armed)
+                print("Armed — gestures active." if armed else "Disarmed.")
+        else:
+            point_hold_start = None
+            toggle_consumed = False
+
+        # Auto-disarm after armed_timeout seconds with no action fired.
+        if armed and now - armed_at >= armed_timeout:
+            armed = False
+            tray.set_armed(False)
+            print(f"Auto-disarmed after {armed_timeout}s idle.")
+
+        if armed and stable and stable in cfg["gestures"]:
             entry = cfg["gestures"][stable]
-            now = time.time()
             # Edge-triggered: fires once per hold. Gestures marked "repeat" in
             # config (e.g. volume up/down) keep refiring every cooldown while held.
             if not fired_this_hold or (entry.get("repeat") and now - last_fired.get(stable, 0) >= cooldown):
                 last_fired[stable] = now
                 fired_this_hold = True
+                armed_at = now  # activity keeps the arm alive; idle disarms
                 execute_action(stable, entry)
 
-        cv2.putText(frame, gesture or "no gesture", (10, 35),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 0) if gesture else (0, 0, 255), 2)
-        cv2.imshow("Hand Gesture Control (q to quit)", frame)
-        if cv2.waitKey(1) & 0xFF == ord("q"):
+        if show_preview:
+            status = "ARMED" if armed else "hold point 3s to arm"
+            cv2.putText(frame, f"{gesture or 'no gesture'}  [{status}]", (10, 35),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0) if armed else (0, 0, 255), 2)
+            cv2.imshow("Hand Gesture Control (q to quit)", frame)
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                break
+        else:
+            time.sleep(0.005)  # yield without a preview window; the tray icon is the only UI
+
+        if tray.stop_event.is_set():  # tray > Quit
             break
 
-    cap.release()
+    if cap is not None:
+        cap.release()
     cv2.destroyAllWindows()
+    tray.close()
     landmarker.close()
 
 

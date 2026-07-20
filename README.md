@@ -48,11 +48,45 @@ erroring.
 | Open palm | Play/pause |
 | Thumbs up / down | Volume up / down (±5%) |
 | Peace (index+middle) | Next track |
-| Point (index only) | Screenshot (`Win+Shift+S`) |
+| Point (index only) | **Arm / disarm** (hold 3s) — not a bindable action |
 | OK sign (thumb-index pinch, other 3 up) | Launch game |
 | Rock-on (index+pinky) | Launch Spotify |
 | L-shape (thumb+index) | Opera with preset tabs |
 | Three fingers (index+middle+ring) | Launch your chosen app |
+
+## Arming (the point gesture)
+
+The camera runs continuously, but gestures do **nothing** until you arm it, so
+everyday hand movements never trigger anything by accident.
+
+- A **system-tray icon** (bottom-right, near the clock) shows state:
+  **red = disarmed, green = armed**. Right-click it > **Quit** to exit.
+- Hold the **point** gesture (index finger only) steadily for
+  `settings.arm_hold_seconds` (default 3s) to toggle. Red → green on arm.
+- While armed, all other gestures fire as normal.
+- It **auto-disarms** after `settings.armed_timeout_seconds` (default 12s) with
+  no action fired, or immediately when you hold point for 3s again. Each fired
+  action resets the idle timer, so an active session won't cut out mid-use.
+
+`point` is the arm toggle and can't be bound to an action.
+
+By default the app runs headless (tray icon only, no webcam window) so it can
+sit in the background. Set `settings.show_preview` to `true` to get the live
+preview window back (with `q` to quit) — useful for aiming or debugging.
+
+### If you can't see the tray dot
+
+Windows 11 hides every new tray icon in the overflow flyout (the `^` chevron
+left of the clock) by default. Either drag it out onto the taskbar, or re-run
+`make_shortcut.ps1` — it sets `IsPromoted=1` under
+`HKCU\Control Panel\NotifyIconSettings` for you. Restart Explorer (or log out)
+to apply.
+
+### Running at startup
+
+`make_shortcut.ps1` registers the app to launch in the background at every
+login (plus a `Ctrl+Alt+G` listener that relaunches it if it has exited). Run
+once: `powershell -ExecutionPolicy Bypass -File make_shortcut.ps1`.
 
 ## Debounce and cooldown
 
@@ -74,6 +108,13 @@ creates a Desktop shortcut that launches the script with `pythonw.exe` (no
 console window) bound to **Ctrl+Alt+G** — press that combo anytime to start
 it without opening a terminal. Edit the `Hotkey` line in the script first if
 you want a different combo.
+
+**Camera priority**: this script always yields the webcam to any other app.
+Windows keeps a log of which app is actively reading the camera right now
+(the same data behind the taskbar camera-in-use icon), and every second the
+script checks it — if something else has claimed the camera it releases its
+own handle and waits, reacquiring automatically once that app is done. No
+config needed; it just always loses the race on purpose.
 
 While running: on battery power, the script closes itself automatically
 after `settings.battery_idle_timeout_seconds` (default 300s = 5 min) with no
