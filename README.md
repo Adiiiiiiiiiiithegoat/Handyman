@@ -7,11 +7,12 @@ fixed gesture fires one action.
 ## Setup
 
 ```
-pip install opencv-python mediapipe pyautogui psutil pycaw comtypes
+pip install -r requirements.txt
 ```
 
 (`psutil` reads battery/AC status for the auto-close behavior; `pycaw` +
-`comtypes` set exact system-volume steps via the Windows Core Audio API.)
+`comtypes` set exact system-volume steps via the Windows Core Audio API;
+`pystray` + `Pillow` draw the system-tray status dot.)
 
 You also need the hand-landmark model file. Recent MediaPipe releases
 (0.10.9+, including the 0.10.35 tested here) dropped the old `mp.solutions`
@@ -28,51 +29,67 @@ same link if it's missing.
 
 ## Run
 
+**Press `Ctrl+Alt+G`** — that's the shortcut, and it toggles the app on and off.
+See **[SHORTCUT.md](SHORTCUT.md)** for the full story (setup, changing the
+combo, what to do when it doesn't fire).
+
+Or start it directly:
+
 ```
 python hand_gesture_control.py
 ```
 
-A mirrored preview window opens with hand landmarks drawn and the current
-gesture name overlaid. Press **q** in the window to quit.
+Either way it runs **headless**: no window, just a colored dot in the system
+tray (red = disarmed, green = armed). Set `settings.show_preview` to `true` in
+`config.json` to get a mirrored preview window with the landmarks and current
+gesture name drawn on it — useful for aiming or debugging; press **q** in that
+window to quit.
 
-Before launching gestures work, fill in the `REPLACE_ME` placeholders in
-`config.json` (Steam app id, Opera path, tab URLs, custom app path). Entries
-still containing `REPLACE_ME` are skipped with a console message instead of
+Nothing fires until you **arm** it — hold the OK sign 👌 for 1.5s, see
+[Arming](#arming-the-ok-sign-gesture) below.
+
+Before the launch gestures work, fill in the `REPLACE_ME` placeholders in
+`config.json` (Opera path, tab URLs, custom app path). Entries still
+containing `REPLACE_ME` are skipped with a console message instead of
 erroring.
 
 ## Gestures
 
 | Gesture | Action |
 |---|---|
-| Fist | Mute/unmute |
-| Open palm | Play/pause |
-| Thumbs up / down | Volume up / down (±5%) |
-| Peace (index+middle) | Next track |
-| Point (index only) | **Arm / disarm** (hold 3s) — not a bindable action |
-| OK sign (thumb-index pinch, other 3 up) | Launch game |
+| Fist | Mute/unmute (0.5s hold, 5s cooldown) |
+| Open palm | Play/pause (2s cooldown) |
+| Thumbs up / down | Volume up / down (±10%) |
+| Pinky only | Next track (2s cooldown) |
+| Point (index only) | Previous track (2s cooldown) |
+| OK sign (thumb-index pinch, other 3 up) | **Arm / disarm** (hold 1.5s) — not a bindable action |
 | Rock-on (index+pinky) | Launch Spotify |
 | L-shape (thumb+index) | Opera with preset tabs |
 | Three fingers (index+middle+ring) | Launch your chosen app |
 
-## Arming (the point gesture)
+## Arming (the OK-sign gesture)
 
 The camera runs continuously, but gestures do **nothing** until you arm it, so
 everyday hand movements never trigger anything by accident.
 
 - A **system-tray icon** (bottom-right, near the clock) shows state:
-  **red = disarmed, green = armed**. Right-click it > **Quit** to exit.
-- Hold the **point** gesture (index finger only) steadily for
-  `settings.arm_hold_seconds` (default 3s) to toggle. Red → green on arm.
+  **red = disarmed, green = armed, yellow = OK-sign held but the hold hasn't
+  reached the toggle threshold yet**. Right-click it > **Quit** to exit.
+- Hold the **OK sign** (thumb-index pinch, other three fingers up) steadily
+  for `settings.arm_hold_seconds` (default 1.5s) to toggle. The dot flips to
+  green/red the instant the toggle fires, even if you're still holding the
+  gesture — no more waiting on yellow to find out if it registered.
 - While armed, all other gestures fire as normal.
 - It **auto-disarms** after `settings.armed_timeout_seconds` (default 12s) with
-  no action fired, or immediately when you hold point for 3s again. Each fired
-  action resets the idle timer, so an active session won't cut out mid-use.
+  no action fired, or immediately when you hold the OK sign for 1.5s again. Each
+  fired action resets the idle timer, so an active session won't cut out
+  mid-use.
 
-`point` is the arm toggle and can't be bound to an action.
+`ok_sign` is the arm toggle and can't be bound to an action. The Steam launch
+that used to live on it (and later on `point`) is now unbound — `peace`
+(index+middle) is recognized by the classifier but has no config entry, so
+that's where to put it if you want it back.
 
-By default the app runs headless (tray icon only, no webcam window) so it can
-sit in the background. Set `settings.show_preview` to `true` to get the live
-preview window back (with `q` to quit) — useful for aiming or debugging.
 
 ### If you can't see the tray dot
 
@@ -85,8 +102,10 @@ to apply.
 ### Running at startup
 
 `make_shortcut.ps1` registers the app to launch in the background at every
-login (plus a `Ctrl+Alt+G` listener that relaunches it if it has exited). Run
-once: `powershell -ExecutionPolicy Bypass -File make_shortcut.ps1`.
+login, plus a `Ctrl+Alt+G` listener that starts it if it's stopped and stops
+it if it's running. Run once:
+`powershell -ExecutionPolicy Bypass -File make_shortcut.ps1`. See
+**[SHORTCUT.md](SHORTCUT.md)**.
 
 ## Debounce and cooldown
 
@@ -100,14 +119,32 @@ once: `powershell -ExecutionPolicy Bypass -File make_shortcut.ps1`.
   a gesture's config entry to make it instead keep refiring every
   `cooldown_seconds` while held — `thumbs_up`/`thumbs_down` use this so
   holding the gesture steps the volume repeatedly.
+- **Hold delay** (`"hold_seconds"` per gesture, falls back to
+  `settings.default_hold_seconds`, default 0.35s): requires the gesture to be
+  held this long before it fires the first time. Applies to every gesture by
+  default so a quick pass-through shape (e.g. an open palm mid-wave) doesn't
+  fire anything; `fist` overrides it to 0.5s since accidental clenches are
+  worth an extra beat.
+- **Per-gesture cooldown** (`"cooldown_seconds"` per gesture, falls back to
+  the global `cooldown_seconds` for `"repeat"` gestures, otherwise 0): the
+  minimum time between two separate fires of that gesture, even across a
+  release-and-redo. `fist` uses 5s, `pinky` (next track) uses 2s.
+- **Stationary-hand check** (`settings.max_hand_speed`, default 0.035):
+  frame-to-frame movement of the centroid of all 21 landmarks (in
+  MediaPipe's normalized 0–1 coordinates) above this is treated as "hand in
+  motion" and the gesture is ignored for that frame — filters out gestures
+  caught mid-wave or mid-reach. Uses the centroid rather than just the wrist
+  because a "hello" wave pivots at the wrist, so the wrist point itself
+  barely moves even as the fingers sweep a wide arc. Lower it if legitimate
+  slow gestures get ignored; raise it if fast waves still slip through.
 
 ## Running in the background + battery-aware auto-close
 
 Run `powershell -ExecutionPolicy Bypass -File make_shortcut.ps1` once. It
-creates a Desktop shortcut that launches the script with `pythonw.exe` (no
-console window) bound to **Ctrl+Alt+G** — press that combo anytime to start
-it without opening a terminal. Edit the `Hotkey` line in the script first if
-you want a different combo.
+creates a Desktop shortcut plus two Startup-folder entries: the app itself
+(so it runs from every login, `pythonw.exe`, no console window) and
+`hotkey_listener.py`, which owns **Ctrl+Alt+G** and toggles the app on/off.
+Full details in **[SHORTCUT.md](SHORTCUT.md)**.
 
 **Camera priority**: this script always yields the webcam to any other app.
 Windows keeps a log of which app is actively reading the camera right now
@@ -118,9 +155,9 @@ config needed; it just always loses the race on purpose.
 
 While running: on battery power, the script closes itself automatically
 after `settings.battery_idle_timeout_seconds` (default 300s = 5 min) with no
-hand visible in frame. Plugged into AC power, it keeps running until you
-press `q` — no auto-close. This is checked every frame via
-`psutil.sensors_battery()`.
+hand visible in frame. Plugged into AC power, it keeps running until you quit
+it (tray icon > Quit, or `Ctrl+Alt+G`) — no auto-close. This is checked every
+frame via `psutil.sensors_battery()`.
 
 ## Adding a new gesture
 

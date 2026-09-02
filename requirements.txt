@@ -1,0 +1,9 @@
+# pip install -r requirements.txt
+opencv-python
+mediapipe>=0.10.9   # Tasks API; older releases only have the removed mp.solutions API
+pyautogui
+psutil              # battery/AC status for the on-battery auto-close
+pycaw               # Core Audio API: exact volume steps, unlike media keys' fixed ~2%
+comtypes            # pycaw's COM layer
+pystray             # system-tray status dot
+Pillow              # draws the tray dot image

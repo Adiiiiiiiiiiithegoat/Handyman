@@ -2,6 +2,118 @@
 
 All notable changes to this project. Newest entry at the top.
 
+## 2026-09-02 — Debug pass: pyautogui fail-safe, dead tray Quit, docs
+
+- **Media keys silently failed whenever the mouse was parked in a screen
+  corner.** pyautogui's fail-safe aborts any input call in that state — it
+  exists to let you kill a runaway script that is *moving* the cursor, which
+  this app never does. `gesture_control.log` had nine
+  `[fist]/[open_palm] action failed: PyAutoGUI fail-safe triggered` lines from
+  real use. Now sets `pyautogui.FAILSAFE = False` at import.
+- **Tray > Quit did nothing while the camera was yielded to another app.**
+  The `cap is None` branch `continue`d straight past the `tray.stop_event`
+  check at the bottom of the loop, so during a Teams/Zoom call the app could
+  not be quit at all — it hung until the other app released the camera. The
+  pause branch now checks `stop_event` too.
+- **`show_preview` shipped as `true`** while the README, `CLAUDE.md` and
+  `make_shortcut.ps1`'s login-startup design all assumed headless — so a
+  stray webcam window popped up at every login. Set to `false` to match.
+- **`open_palm` play/pause double-fired** (3–4 consecutive fires per hold in
+  the log): with no `cooldown_seconds` a single-frame classifier dropout reset
+  the hold and re-armed it. Given `cooldown_seconds: 2`, matching
+  `pinky`/`point`.
+- **`pystray` and `Pillow` were missing from the README's install line** even
+  though both are hard imports — a fresh clone died on `ImportError`. Added
+  `requirements.txt` and pointed the README at it.
+- The fire gate (hold / cooldown / edge-vs-repeat) moved out of `main()` into
+  a pure `should_fire()` so it's testable; `test_gestures.py` gained
+  `run_fire_gate()` covering all three gates. No behavior change.
+- **New `SHORTCUT.md`**: what `Ctrl+Alt+G` does, the tray dot colors, the
+  three shortcuts `make_shortcut.ps1` creates, how to change the key combo,
+  and what to check when the hotkey doesn't fire.
+- README: `Ctrl+Alt+G` is now documented up front in "Run". Corrected two
+  stale claims — the Desktop shortcut is *not* bound to `Ctrl+Alt+G`
+  (`make_shortcut.ps1` deliberately clears that `.lnk` binding and hands the
+  combo to `hotkey_listener.py`), and the hotkey toggles rather than
+  "relaunches it if it has exited".
+
+## 2026-07-26 — Ctrl+Alt+G toggles instead of only launching
+
+- `hotkey_listener.py`: pressing the hotkey while `hand_gesture_control.py` is
+  running now terminates it; previously the press was swallowed (the duplicate
+  guard just ignored it) and the only way to stop the script was the tray
+  menu. `_already_running()` → `_running_proc()` returning the process so it
+  can be killed.
+
+## 2026-07-25 — Volume step ±5% → ±10%
+
+- `thumbs_up`/`thumbs_down` `value` 5 → 10. Repeat firing meant reaching a
+  usable volume took a long hold; 10% gets there in half the frames.
+
+## 2026-07-25 — Faster arm hold, previous track on `point`
+
+- `settings.arm_hold_seconds` 3 → 1.5. The 3s hold was tuned to be
+  hard to trigger accidentally, but the OK sign is distinctive enough that
+  1.5s doesn't misfire in practice and makes arming feel less sluggish.
+- `point` (index only) now sends `prevtrack` (previous track, 2s cooldown to
+  match `pinky`/next track). The Steam launch placeholder it held is dropped
+  rather than relocated — `peace` is classified but unbound if it's wanted
+  back.
+
+## 2026-07-21 — Fix stationary-hand check missing wave motion
+
+- The stationary-hand check (previous entry below) tracked only the wrist
+  landmark, but a "hello" wave rotates mostly at the wrist joint itself — the
+  wrist point barely moves even though the fingers sweep a wide arc, so fast
+  waves slipped through undetected and still fired open-palm play/pause.
+  Now tracks the centroid of all 21 landmarks instead, which moves with
+  either hand translation or wrist-pivoted rotation.
+
+## 2026-07-21 — Motion gating, per-gesture cooldowns, arm gesture moved to OK-sign
+
+- **Stationary-hand check**: a gesture is now ignored on any frame where the
+  wrist moves more than `settings.max_hand_speed` (default 0.035, normalized
+  coords) since the last frame. Fixes gestures firing off a wave or reach
+  passing through a recognizable shape (e.g. open palm mid-wave triggering
+  play/pause).
+- **Default hold delay for every gesture**: `hold_seconds` now falls back to
+  `settings.default_hold_seconds` (default 0.35s) instead of 0, so *every*
+  gesture needs a brief stable hold before firing, not just ones with an
+  explicit override. `fist` keeps its longer 0.5s override.
+- **Per-gesture cooldown**: new `"cooldown_seconds"` per gesture applies even
+  to non-repeat gestures now — it's the minimum gap between two separate
+  fires, including release-then-redo (previously only repeat gestures like
+  volume respected a cooldown; a plain edge-triggered gesture could refire
+  instantly on release). `fist` set to 5s, `pinky` (next track) set to 2s.
+- **Next track moved from `peace` to `pinky`-only** (classifier: pinky
+  extended, all other fingers curled) — `peace` was too easy to trigger
+  by accident; new `"pinky"` config entry.
+- **Arm/disarm gesture moved from `point` to `ok_sign`** (thumb-index pinch,
+  other three fingers up) — more reliable to hold steadily than a bare index
+  point. `point` is no longer reserved and now runs the Steam-launch action
+  that used to live on `ok_sign`.
+- **Tray-icon bug fix**: the dot used to stay yellow ("arming") even after
+  the hold crossed the toggle threshold, only flipping to green/red once you
+  released the gesture — so there was no way to tell mid-hold whether arming
+  had actually registered. It now flips immediately at the moment of toggle.
+- `TrayIndicator` state renamed `"pointing"` → `"arming"` to match (no longer
+  tied to a specific gesture name).
+
+## 2026-07-21 — Per-gesture hold delay to filter accidental triggers
+
+- New `"hold_seconds"` field on a gesture's `config.json` entry: the gesture
+  must be held this long before it fires for the first time (repeat refires
+  are unaffected). `fist` now defaults to `0.5`, so a brief, accidental
+  clench doesn't mute audio — mirrors the hold-to-arm pattern already used
+  for the `point` gesture.
+- Tray dot now has a third color: **yellow, while the point gesture is being
+  held** (mid-hold, whether or not it crosses the arm/disarm toggle
+  threshold), on top of the existing red = disarmed / green = armed. Lets you
+  confirm the classifier is actually seeing "point" without waiting for the
+  arm/disarm flip.
+- `TrayIndicator.set_armed(bool)` replaced with `set_state(str)` taking
+  `"armed" | "disarmed" | "pointing"`.
+
 ## 2026-07-19 — Arm/disarm gating, tray icon, background auto-start
 
 - Gestures no longer fire whenever the camera sees them. The app now runs in a

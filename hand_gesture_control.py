@@ -30,6 +30,13 @@ from mediapipe.tasks.python.vision import (
 from mediapipe.tasks.python.vision.core.image import Image, ImageFormat
 from mediapipe.tasks.python.vision import drawing_utils
 
+# pyautogui's fail-safe aborts any key press while the mouse sits in a screen
+# corner — it exists to let you kill a runaway script that is *moving* the
+# mouse. This app never touches the cursor, so the fail-safe only ever misfired:
+# gesture_control.log shows mute/play-pause silently failing with
+# "fail-safe triggered" whenever the pointer was parked in a corner.
+pyautogui.FAILSAFE = False
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 MODEL_PATH = os.path.join(BASE_DIR, "hand_landmarker.task")
@@ -124,6 +131,8 @@ class GestureClassifier:
             return "fist"
         if thumb and not any((index, middle, ring, pinky)):
             return "thumbs_up" if lm[THUMB_TIP].y < lm[WRIST].y else "thumbs_down"
+        if pinky and not any((thumb, index, middle, ring)):
+            return "pinky"
         if index and pinky and not middle and not ring:
             return "rock_on"  # thumb ignored: rock-on and "spiderman" both count
         if index and middle and ring and not thumb and not pinky:
@@ -219,35 +228,67 @@ def execute_action(name, entry):
         print(f"[{name}] action failed: {e}")
 
 
+def should_fire(entry, now, stable_since, last_fired, fired_this_hold,
+                default_hold_seconds, default_cooldown):
+    """True if this gesture entry should fire on this frame.
+
+    Three independent gates, all of which must pass:
+      - hold:     held (stable) for "hold_seconds", else settings.default_hold_seconds
+      - cooldown: "cooldown_seconds" since the last fire. Defaults to the global
+                  cooldown for "repeat" gestures and to 0 otherwise, so a plain
+                  gesture can be re-fired immediately after a deliberate redo
+                  unless it opts in to a gap (e.g. fist: 5s between mutes).
+      - edge:     fires once per hold, unless "repeat" is set (volume up/down),
+                  which keeps refiring every cooldown while the gesture is held.
+    """
+    hold_required = entry.get("hold_seconds", default_hold_seconds)
+    gesture_cooldown = entry.get("cooldown_seconds",
+                                 default_cooldown if entry.get("repeat") else 0)
+    return (now - stable_since >= hold_required
+            and now - last_fired >= gesture_cooldown
+            and (not fired_this_hold or bool(entry.get("repeat"))))
+
+
+_STATE_COLORS = {
+    "armed": (34, 200, 34),
+    "disarmed": (210, 40, 40),
+    "arming": (230, 200, 0),  # holding the arm/disarm gesture, toggle not fired yet
+}
+
+
 class TrayIndicator:
-    """System-tray (taskbar notification area) dot: green = armed, red = disarmed.
+    """System-tray (taskbar notification area) dot: green = armed, red = disarmed,
+    yellow = arm/disarm gesture currently held but the toggle hasn't fired yet.
 
     pystray owns the tray icon on its own thread; the main loop just calls
-    set_armed(). Right-click > Quit sets stop_event so the main loop exits
+    set_state(). Right-click > Quit sets stop_event so the main loop exits
     cleanly — the reliable way to stop it when running headless at startup
     (no console, and the preview window may be hidden).
     """
 
     def __init__(self):
         self.stop_event = threading.Event()
+        self._state = "disarmed"
         self._icon = pystray.Icon(
             "hand_gesture_control",
-            self._image(False),
+            self._image("disarmed"),
             "Hand Gesture Control — disarmed",
             menu=pystray.Menu(pystray.MenuItem("Quit", self._quit)),
         )
         threading.Thread(target=self._icon.run, daemon=True).start()
 
     @staticmethod
-    def _image(armed):
+    def _image(state):
         img = PILImage.new("RGBA", (64, 64), (0, 0, 0, 0))
-        ImageDraw.Draw(img).ellipse((8, 8, 56, 56),
-                                    fill=(34, 200, 34) if armed else (210, 40, 40))
+        ImageDraw.Draw(img).ellipse((8, 8, 56, 56), fill=_STATE_COLORS[state])
         return img
 
-    def set_armed(self, armed):
-        self._icon.icon = self._image(armed)
-        self._icon.title = "Hand Gesture Control — " + ("armed" if armed else "disarmed")
+    def set_state(self, state):
+        if state == self._state:
+            return
+        self._state = state
+        self._icon.icon = self._image(state)
+        self._icon.title = "Hand Gesture Control — " + state
 
     def _quit(self, icon, _item):
         self.stop_event.set()
@@ -269,11 +310,14 @@ def main():
     settings = cfg["settings"]
     debounce_frames = settings.get("debounce_frames", 4)
     cooldown = settings.get("cooldown_seconds", 1.2)
+    default_hold_seconds = settings.get("default_hold_seconds", 0.35)
+    max_hand_speed = settings.get("max_hand_speed", 0.035)  # normalized-coords landmark-centroid movement/frame above which a gesture is ignored as "in motion"
     battery_idle_timeout = settings.get("battery_idle_timeout_seconds", 300)
     camera_index = settings.get("camera_index", 0)
     arm_hold = settings.get("arm_hold_seconds", 3)
     armed_timeout = settings.get("armed_timeout_seconds", 12)
     show_preview = settings.get("show_preview", False)  # off = background, tray icon only
+    arm_gesture = "ok_sign"  # holding this gesture toggles armed; not bindable to an action
 
     if not os.path.exists(MODEL_PATH):
         sys.exit(f"Hand landmark model not found: {MODEL_PATH}\n"
@@ -301,19 +345,22 @@ def main():
 
     candidate, streak = None, 0          # debounce state
     stable_gesture = None                # last gesture confirmed by debounce
+    stable_since = 0.0                   # when stable_gesture last changed, for gestures.<name>.hold_seconds
     fired_this_hold = False              # has stable_gesture already fired once?
     last_fired = {}                      # gesture name -> timestamp, for repeat cooldown
     armed = False                        # actions only fire while armed
     armed_at = 0.0                       # for the idle auto-disarm timeout
-    point_hold_start = None              # when the current continuous "point" hold began
+    arm_hold_start = None                # when the current continuous arm-gesture hold began
     toggle_consumed = False              # arm/disarm fired for this hold; wait for release
+    prev_center = None                   # last frame's landmark centroid (x, y), for the stationary-hand check
     tray = TrayIndicator()
     start_time = time.monotonic()  # detect_for_video needs strictly increasing timestamps; wall clock can step backward
     last_hand_seen = time.time()         # for the on-battery idle timeout
     last_camera_check = 0.0
-    print("Running. Tray icon (bottom-right, near the clock): red = disarmed, green = armed.")
-    print("Hold the point gesture for 3s to arm. Quit via the tray icon's right-click menu"
-          + (" or 'q' in the preview window." if show_preview else "."))
+    print("Running. Tray icon (bottom-right, near the clock): red = disarmed, "
+          f"green = armed, yellow = {arm_gesture} gesture detected.")
+    print(f"Hold the {arm_gesture} gesture for {arm_hold}s to arm. Quit via the tray icon's "
+          "right-click menu" + (" or 'q' in the preview window." if show_preview else "."))
     print("Yields the camera automatically whenever another app needs it.")
     print(f"On battery, this closes after {battery_idle_timeout}s with no hand in frame; "
           "plugged in, it runs until you quit.")
@@ -337,6 +384,8 @@ def main():
                     candidate_cap.release()
 
         if cap is None:
+            if tray.stop_event.is_set():  # tray > Quit must work while paused too
+                break
             time.sleep(0.2)
             continue
 
@@ -356,7 +405,19 @@ def main():
             lm = result.hand_landmarks[0]
             if show_preview:
                 drawing_utils.draw_landmarks(frame, lm, HandLandmarksConnections.HAND_CONNECTIONS)
-            gesture = classifier.classify(lm)
+            # Centroid of all 21 landmarks, not just the wrist: a "hello" wave
+            # rotates mostly at the wrist, so the wrist point itself barely
+            # moves even though the fingers sweep a wide arc — the wrist alone
+            # misses that motion entirely. The centroid shifts with either a
+            # translating hand or a rotating/waving one.
+            cx = sum(p.x for p in lm) / len(lm)
+            cy = sum(p.y for p in lm) / len(lm)
+            moving = prev_center is not None and math.hypot(cx - prev_center[0], cy - prev_center[1]) > max_hand_speed
+            prev_center = (cx, cy)
+            if not moving:  # ignore gestures while the hand is still in transit (e.g. mid-wave)
+                gesture = classifier.classify(lm)
+        else:
+            prev_center = None
 
         battery = psutil.sensors_battery()
         if battery and not battery.power_plugged and time.time() - last_hand_seen > battery_idle_timeout:
@@ -368,46 +429,49 @@ def main():
         candidate = gesture
         stable = candidate if streak >= debounce_frames else None
 
+        now = time.time()
+
         if stable != stable_gesture:
             stable_gesture = stable
             fired_this_hold = False
+            stable_since = now
 
-        now = time.time()
-
-        # Arm/disarm: hold "point" steadily for arm_hold seconds to toggle.
+        # Arm/disarm: hold arm_gesture steadily for arm_hold seconds to toggle.
         # toggle_consumed makes one hold flip the state exactly once; you must
-        # drop the point before it can toggle again.
-        if stable == "point":
-            if point_hold_start is None:
-                point_hold_start = now
-            elif not toggle_consumed and now - point_hold_start >= arm_hold:
+        # release the gesture before it can toggle again.
+        if stable == arm_gesture:
+            if not toggle_consumed:
+                tray.set_state("arming")
+            if arm_hold_start is None:
+                arm_hold_start = now
+            elif not toggle_consumed and now - arm_hold_start >= arm_hold:
                 armed = not armed
                 armed_at = now
                 toggle_consumed = True
-                tray.set_armed(armed)
+                tray.set_state("armed" if armed else "disarmed")  # reflect the flip immediately, even mid-hold
                 print("Armed — gestures active." if armed else "Disarmed.")
         else:
-            point_hold_start = None
+            arm_hold_start = None
             toggle_consumed = False
+            tray.set_state("armed" if armed else "disarmed")
 
         # Auto-disarm after armed_timeout seconds with no action fired.
         if armed and now - armed_at >= armed_timeout:
             armed = False
-            tray.set_armed(False)
+            tray.set_state("disarmed")
             print(f"Auto-disarmed after {armed_timeout}s idle.")
 
         if armed and stable and stable in cfg["gestures"]:
             entry = cfg["gestures"][stable]
-            # Edge-triggered: fires once per hold. Gestures marked "repeat" in
-            # config (e.g. volume up/down) keep refiring every cooldown while held.
-            if not fired_this_hold or (entry.get("repeat") and now - last_fired.get(stable, 0) >= cooldown):
+            if should_fire(entry, now, stable_since, last_fired.get(stable, 0),
+                           fired_this_hold, default_hold_seconds, cooldown):
                 last_fired[stable] = now
                 fired_this_hold = True
                 armed_at = now  # activity keeps the arm alive; idle disarms
                 execute_action(stable, entry)
 
         if show_preview:
-            status = "ARMED" if armed else "hold point 3s to arm"
+            status = "ARMED" if armed else f"hold {arm_gesture} {arm_hold}s to arm"
             cv2.putText(frame, f"{gesture or 'no gesture'}  [{status}]", (10, 35),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0) if armed else (0, 0, 255), 2)
             cv2.imshow("Hand Gesture Control (q to quit)", frame)

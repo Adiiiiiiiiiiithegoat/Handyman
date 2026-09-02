@@ -3,44 +3,51 @@
     "camera_index": 0,
     "debounce_frames": 4,
     "cooldown_seconds": 1.2,
+    "default_hold_seconds": 0.35,
+    "max_hand_speed": 0.035,
     "pinch_threshold": 0.06,
     "battery_idle_timeout_seconds": 300,
-    "arm_hold_seconds": 3,
+    "arm_hold_seconds": 1.5,
     "armed_timeout_seconds": 12,
-    "show_preview": true
+    "show_preview": false
   },
   "gestures": {
     "fist": {
       "label": "Mute/unmute system audio",
       "action": "media_key",
-      "value": "volumemute"
+      "value": "volumemute",
+      "hold_seconds": 0.5,
+      "cooldown_seconds": 5
     },
     "open_palm": {
       "label": "Play/pause current media",
       "action": "media_key",
-      "value": "playpause"
+      "value": "playpause",
+      "cooldown_seconds": 2
     },
     "thumbs_up": {
-      "label": "Volume up (+5%)",
+      "label": "Volume up (+10%)",
       "action": "volume_step",
-      "value": 5,
+      "value": 10,
       "repeat": true
     },
     "thumbs_down": {
-      "label": "Volume down (-5%)",
+      "label": "Volume down (-10%)",
       "action": "volume_step",
-      "value": -5,
+      "value": -10,
       "repeat": true
     },
-    "peace": {
+    "pinky": {
       "label": "Next track",
       "action": "media_key",
-      "value": "nexttrack"
+      "value": "nexttrack",
+      "cooldown_seconds": 2
     },
-    "ok_sign": {
-      "label": "Launch a game via Steam. Replace with your game's app id (see README), or a direct .exe path",
-      "action": "launch_app",
-      "value": "steam://rungameid/REPLACE_ME_STEAM_APP_ID"
+    "point": {
+      "label": "Previous track",
+      "action": "media_key",
+      "value": "prevtrack",
+      "cooldown_seconds": 2
     },
     "rock_on": {
       "label": "Launch the installed Spotify app",

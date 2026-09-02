@@ -38,16 +38,16 @@ def _log(message):
         f.write(f"[{datetime.datetime.now().isoformat(timespec='seconds')}] {message}\n")
 
 
-def _already_running():
-    """True if hand_gesture_control.py is already running, to avoid piling up duplicates."""
+def _running_proc():
+    """The running hand_gesture_control.py process, or None."""
     for proc in psutil.process_iter(["cmdline"]):
         try:
             cmdline = proc.info["cmdline"] or []
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
         if any("hand_gesture_control.py" in str(part) for part in cmdline):
-            return True
-    return False
+            return proc
+    return None
 
 
 def _launch():
@@ -67,8 +67,20 @@ def _launch():
     _log("Ctrl+Alt+G pressed -> launched hand_gesture_control.py")
 
 
+def _stop(proc):
+    """Kill the running gesture script.
+
+    ponytail: TerminateProcess, no graceful shutdown handshake. The script
+    holds no state worth flushing; the webcam and tray icon are released by
+    the OS when the process dies. Add a signal/IPC path only if it ever needs
+    to save something on exit.
+    """
+    proc.terminate()
+    _log("Ctrl+Alt+G pressed -> terminated hand_gesture_control.py")
+
+
 def main():
-    """Register Ctrl+Alt+G and launch the gesture script each time it's pressed."""
+    """Register Ctrl+Alt+G and toggle the gesture script on each press."""
     if not ctypes.windll.user32.RegisterHotKey(None, HOTKEY_ID, MOD_CONTROL | MOD_ALT, VK_G):
         _log(f"RegisterHotKey FAILED, Win32 error {ctypes.GetLastError()}")
         sys.exit(1)
@@ -77,8 +89,12 @@ def main():
     msg = wintypes.MSG()
     try:
         while ctypes.windll.user32.GetMessageA(ctypes.byref(msg), None, 0, 0) != 0:
-            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID and not _already_running():
-                _launch()
+            if msg.message == WM_HOTKEY and msg.wParam == HOTKEY_ID:
+                proc = _running_proc()
+                if proc:
+                    _stop(proc)
+                else:
+                    _launch()
     finally:
         ctypes.windll.user32.UnregisterHotKey(None, HOTKEY_ID)
         _log("Listener stopped, hotkey unregistered.")

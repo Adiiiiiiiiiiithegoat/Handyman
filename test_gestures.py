@@ -1,4 +1,4 @@
-"""Smoke test: GestureClassifier's branch table maps finger states to the right names."""
+"""Smoke tests: GestureClassifier's branch table, and should_fire's hold/cooldown gates."""
 from types import SimpleNamespace as P
 
 import hand_gesture_control as h
@@ -70,5 +70,38 @@ def run():
     print("ALL GESTURE CHECKS PASS")
 
 
+def run_fire_gate():
+    """Assert should_fire's hold / cooldown / edge-vs-repeat gates."""
+    HOLD, COOL = 0.35, 1.2
+
+    def fire(entry, now, stable_since=0.0, last_fired=0.0, fired_this_hold=False):
+        return h.should_fire(entry, now, stable_since, last_fired,
+                             fired_this_hold, HOLD, COOL)
+
+    plain = {"action": "media_key", "value": "playpause"}
+    # Hold gate: must be stable for default_hold_seconds before the first fire.
+    assert not fire(plain, now=0.2)
+    assert fire(plain, now=0.5)
+    # Edge gate: one fire per hold for a non-repeat gesture.
+    assert not fire(plain, now=5.0, fired_this_hold=True)
+    # ...but a fresh hold (fired_this_hold reset) fires again, no cooldown by default.
+    assert fire(plain, now=5.0, stable_since=4.0, last_fired=4.9)
+
+    repeat = {"action": "volume_step", "value": 10, "repeat": True}
+    # Repeat gate: refires while held, but only once per global cooldown.
+    assert not fire(repeat, now=1.0, last_fired=0.5, fired_this_hold=True)
+    assert fire(repeat, now=2.0, last_fired=0.5, fired_this_hold=True)
+
+    # Per-gesture cooldown gates a *non-repeat* gesture across release-and-redo
+    # (regression: fist re-muting instantly on a second clench).
+    fist = {"action": "media_key", "value": "volumemute",
+            "hold_seconds": 0.5, "cooldown_seconds": 5}
+    assert not fire(fist, now=10.4, stable_since=10.0, last_fired=10.0)  # held 0.4 < 0.5
+    assert not fire(fist, now=12.0, stable_since=11.0, last_fired=10.0)  # 2s < 5s cooldown
+    assert fire(fist, now=16.0, stable_since=15.0, last_fired=10.0)
+    print("ALL FIRE-GATE CHECKS PASS")
+
+
 if __name__ == "__main__":
     run()
+    run_fire_gate()
